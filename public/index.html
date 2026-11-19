@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wayline — Interest-Managed World</title>
+  <link rel="stylesheet" href="/public/style.css" />
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Wayline <em>interest-managed world</em></h1>
+    </div>
+    <div class="net">
+      <span id="conn" class="pill">connecting</span>
+      <span id="tickpill" class="pill muted">tick 0</span>
+      <span id="budgetpill" class="pill muted">— B/s · — ops/s</span>
+    </div>
+    <div class="controls">
+      <label class="field">
+        <span>Observer name</span>
+        <input id="nameinput" value="Browser" maxlength="24" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span>Team</span>
+        <select id="teamselect">
+          <option value="">none</option>
+          <option value="amber">amber</option>
+          <option value="cyan">cyan</option>
+          <option value="violet">violet</option>
+        </select>
+      </label>
+      <button id="autobtn" class="btn" title="Drive this observer in a slow patrol">Autopilot</button>
+      <button id="resetbtn" class="btn ghost" title="Clear local replica and re-request">Reset replica</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <canvas id="world"></canvas>
+      <div class="legend" id="legend">
+        <div class="row"><span class="sw" style="background:#5ee1b3"></span>near ring</div>
+        <div class="row"><span class="sw" style="background:#63b7ff"></span>view cone</div>
+        <div class="row"><span class="sw" style="background:#c68cff"></span>team link</div>
+        <div class="row"><span class="sw" style="background:#ffd166"></span>pinned</div>
+        <div class="row"><span class="sw" style="background:#ff8f6b"></span>interaction hold</div>
+        <div class="row"><span class="sw" style="background:#9aa7b8"></span>interest grace</div>
+        <div class="row"><span class="sw" style="background:#f472b6"></span>dependency parent</div>
+        <div class="row muted">dot fill = subscription reason<br />ring = entity kind</div>
+      </div>
+      <div class="hint">Drag to move · move mouse while holding to face · click an entity to pin/interact</div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <h2>View &amp; budget</h2>
+        <div class="slider">
+          <label for="radius">View radius <b id="radiusv">132</b></label>
+          <input id="radius" type="range" min="50" max="260" value="132" />
+        </div>
+        <div class="slider">
+          <label for="cone">Cone half-angle <b id="conev">60°</b></label>
+          <input id="cone" type="range" min="15" max="180" value="60" />
+        </div>
+        <div class="slider">
+          <label for="near">Near radius <b id="nearv">24</b></label>
+          <input id="near" type="range" min="0" max="90" value="24" />
+        </div>
+        <div class="slider">
+          <label for="bytes">Byte budget / tick <b id="bytesv">3600</b></label>
+          <input id="bytes" type="range" min="400" max="9000" step="100" value="3600" />
+        </div>
+        <div class="slider">
+          <label for="ops">Op budget / tick <b id="opsv">46</b></label>
+          <input id="ops" type="range" min="4" max="120" value="46" />
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Replica <span id="replicacount" class="count">0</span></h2>
+        <div class="statgrid" id="replicastats"></div>
+        <div id="staging" class="staging"></div>
+      </section>
+
+      <section class="card">
+        <h2>Subscription reasons</h2>
+        <div id="reasonbars" class="reasonbars"></div>
+        <div id="entitylist" class="entitylist"></div>
+      </section>
+
+      <section class="card">
+        <h2>Network <span class="small" id="netaverage"></span></h2>
+        <canvas id="netchart" class="chart"></canvas>
+        <div class="statgrid" id="netstats"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>Server-side observers <span class="small">scripted, real protocol</span></h2>
+        <div id="observers" class="observers"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>Lifecycle log</h2>
+        <div id="lifecycle" class="lifecycle"></div>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="/public/app.js"></script>
+</body>
+</html>

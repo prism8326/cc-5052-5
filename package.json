@@ -1,0 +1,14 @@
+{
+  "name": "wayline-interest-world",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Continuous-world interest management demo with server-side filtering and network lifecycle",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
