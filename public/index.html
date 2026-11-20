@@ -96,6 +96,40 @@
       </section>
 
       <section class="card wide">
+        <h2>Instance lab <span class="small">per-instance trace · server ⇆ client</span></h2>
+        <div class="labbar">
+          <label class="labfield">Target <input id="labtarget" maxlength="10" autocomplete="off" /></label>
+          <button id="labnearest" class="btn mini" title="Track the nearest pickable cache">nearest cache</button>
+          <button id="labhover" class="btn mini" title="Track the hovered entity">use hover</button>
+        </div>
+        <div class="labbar">
+          <button id="labdelaycreate" class="btn mini" title="Hold frames carrying creates for 6 ticks">delay sub ×6t</button>
+          <button id="labdelaydestroy" class="btn mini" title="Hold frames carrying destroys for 6 ticks">delay destroy ×6t</button>
+          <button id="labclear" class="btn mini" title="Deliver every held frame now">release held</button>
+          <button id="labreplaydestroy" class="btn mini" title="Re-deliver the cached destroy for the target">replay destroy</button>
+          <button id="labreplaycreate" class="btn mini" title="Re-deliver the cached create for the target">replay create</button>
+        </div>
+        <div class="labbar">
+          <button id="labpickup" class="btn mini" title="Claim the target with the live generation">pick up (current)</button>
+          <button id="labpickupstale" class="btn mini" title="Claim the target with the previous generation — must be rejected">pick up (stale)</button>
+          <button id="labsaverepro" class="btn mini" title="Download the minimal packet sequence for the target">save repro</button>
+        </div>
+        <div id="labstatus" class="labstatus"></div>
+        <div id="misbindbanner" class="misbind hidden"></div>
+        <div class="tracecols">
+          <div class="tracecol">
+            <h3>server <span id="traceservergen" class="genpill"></span></h3>
+            <div id="traceserver" class="tracelog"></div>
+          </div>
+          <div class="tracecol">
+            <h3>client <span id="traceclientgen" class="genpill"></span></h3>
+            <div id="traceclient" class="tracelog"></div>
+          </div>
+        </div>
+        <div id="pickuplog" class="pickuplog"></div>
+      </section>
+
+      <section class="card wide">
         <h2>Server-side observers <span class="small">scripted, real protocol</span></h2>
         <div id="observers" class="observers"></div>
       </section>

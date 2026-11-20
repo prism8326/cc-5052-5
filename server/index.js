@@ -15,6 +15,7 @@ import { WebSocketServer } from 'ws';
 
 import { World } from './world.js';
 import { ObserverSession, normalizeBudget, normalizeView } from './session.js';
+import { FrameLab } from './lab.js';
 import { ClientScene } from '../client/scene.js';
 import {
   DEFAULT_BUDGET,
@@ -144,6 +145,8 @@ export function startServer({ port = 4173, tickMs = TICK_MS, quiet = false } = {
         }
       },
     });
+    observer.lab = new FrameLab(session.send.bind(session));
+    session.send = (payload) => observer.lab.send(payload);
     observer.session = session;
     session.region = regionIdAt(spec.spawn.x, spec.spawn.y);
     observers.set(id, observer);
@@ -183,6 +186,8 @@ export function startServer({ port = 4173, tickMs = TICK_MS, quiet = false } = {
         else if (ws.readyState === 1) ws.send(payload);
       },
     });
+    observer.lab = new FrameLab(session.send.bind(session));
+    session.send = (payload) => observer.lab.send(payload);
     observer.session = session;
     observers.set(id, observer);
     recordLifecycle(observer, { type: 'observer-join', source: 'browser' });
@@ -245,6 +250,28 @@ export function startServer({ port = 4173, tickMs = TICK_MS, quiet = false } = {
       case 'interact': {
         const result = session.interact(msg.id);
         observer.socket?.send(JSON.stringify({ t: 'interact-result', id: msg.id, ...result }));
+        break;
+      }
+      case 'pickup': {
+        const result = session.pickup(msg.id, msg.gen);
+        observer.socket?.send(JSON.stringify({ t: 'pickup-result', id: msg.id, reqGen: msg.gen ?? null, ...result }));
+        break;
+      }
+      case 'lab': {
+        const lab = observer.lab;
+        if (!lab) break;
+        let ok = true;
+        let released = 0;
+        if (msg.op === 'delay-creates') lab.delayCreates(Number(msg.ticks) || 6);
+        else if (msg.op === 'delay-destroys') lab.delayDestroys(Number(msg.ticks) || 6);
+        else if (msg.op === 'replay-destroy') ok = lab.replayDestroy(msg.id);
+        else if (msg.op === 'replay-create') ok = lab.replayCreate(msg.id);
+        else if (msg.op === 'clear') released = lab.clear();
+        else ok = false;
+        observer.socket?.send(JSON.stringify({
+          t: 'lab-result', op: msg.op, ok, released,
+          held: lab.held.length, replays: lab.replays,
+        }));
         break;
       }
       case 'report': {
@@ -327,6 +354,7 @@ export function startServer({ port = 4173, tickMs = TICK_MS, quiet = false } = {
       if (session.profile && session.mode === 'virtual') session.stepAutopilot();
       session.reconcile(world.tick);
       session.emit(world.tick);
+      observer.lab?.step(world.tick);
       checkConformance(observer);
     }
   }
@@ -353,6 +381,14 @@ export function startServer({ port = 4173, tickMs = TICK_MS, quiet = false } = {
           ...tele,
           mode: o.mode,
           conformance: o.conformance,
+          lab: o.lab
+            ? {
+                held: o.lab.held.length,
+                replays: o.lab.replays,
+                holdingCreates: world.tick < o.lab.holdCreatesUntil,
+                holdingDestroys: world.tick < o.lab.holdDestroysUntil,
+              }
+            : null,
           report: o.lastReport
             ? {
                 ids: o.lastReport.ids.length,

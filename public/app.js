@@ -23,6 +23,9 @@ const state = {
   hoverId: null,
   netHistory: [],
   team: '',
+  labTarget: '',
+  pickupLog: [],
+  labNote: '',
 };
 
 // ---- transport ------------------------------------------------------------
@@ -64,6 +67,10 @@ function connect() {
       rtt = msg.at - pingSentAt;
     } else if (msg.t === 'interact-result' || msg.t === 'pin-result') {
       // handled optimistically in UI; nothing to mirror
+    } else if (msg.t === 'pickup-result') {
+      notePickup(msg);
+    } else if (msg.t === 'lab-result') {
+      noteLabResult(msg);
     } else if (msg.t === 'f') {
       // ClientScene.applyFrame is wrapped below to ack baselines.
       const result = scene.applyFrame(msg);
@@ -322,6 +329,28 @@ function bindControls() {
     scene.reset();
     ws?.close();
   });
+
+  // Instance lab
+  $('labtarget').addEventListener('input', (e) => { state.labTarget = e.target.value.trim(); renderLab(); });
+  $('labnearest').addEventListener('click', () => { const id = nearestCacheId(); if (id) setLabTarget(id); });
+  $('labhover').addEventListener('click', () => { if (state.hoverId) setLabTarget(state.hoverId); });
+  $('labdelaycreate').addEventListener('click', () => send({ t: 'lab', op: 'delay-creates', ticks: 6 }));
+  $('labdelaydestroy').addEventListener('click', () => send({ t: 'lab', op: 'delay-destroys', ticks: 6 }));
+  $('labclear').addEventListener('click', () => send({ t: 'lab', op: 'clear' }));
+  $('labreplaydestroy').addEventListener('click', () => send({ t: 'lab', op: 'replay-destroy', id: state.labTarget.trim() }));
+  $('labreplaycreate').addEventListener('click', () => send({ t: 'lab', op: 'replay-create', id: state.labTarget.trim() }));
+  $('labpickup').addEventListener('click', () => {
+    const id = state.labTarget.trim();
+    if (!id) return;
+    send({ t: 'pickup', id, gen: scene.entities.get(id)?.gen });
+  });
+  $('labpickupstale').addEventListener('click', () => {
+    const id = state.labTarget.trim();
+    if (!id) return;
+    const gen = (scene.entities.get(id)?.gen ?? 2) - 1;
+    send({ t: 'pickup', id, gen });
+  });
+  $('labsaverepro').addEventListener('click', saveRepro);
 }
 
 // ---- telemetry rendering --------------------------------------------------
@@ -338,6 +367,7 @@ function applyTelemetry(msg) {
   renderNet(state.me);
   renderObservers(msg.observers);
   renderLifecycle(msg.lifecycle);
+  renderLab();
 }
 
 function renderConn() {
@@ -534,6 +564,126 @@ function renderLifecycle(events) {
   el.innerHTML = rows.join('') || '<div class="empty">no lifecycle events yet</div>';
 }
 
+// ---- instance lab ---------------------------------------------------------
+// Side-by-side per-instance trace: what the server emitted for an id versus
+// what this client actually did with it. The fault buttons drive the
+// server-side FrameLab, which can hold creates, hold destroys, or replay a
+// cached frame to reproduce out-of-order delivery.
+
+function setLabTarget(id) {
+  state.labTarget = id || '';
+  $('labtarget').value = state.labTarget;
+  renderLab();
+}
+
+function nearestCacheId() {
+  let best = null;
+  let bestD = Infinity;
+  for (const e of scene.entities.values()) {
+    if (e.kind !== 'cache') continue;
+    const d = (e.x - state.pose.x) ** 2 + (e.y - state.pose.y) ** 2;
+    if (d < bestD) { bestD = d; best = e.id; }
+  }
+  return best;
+}
+
+function notePickup(msg) {
+  state.pickupLog.unshift({
+    at: scene.tick,
+    id: msg.id,
+    ok: msg.ok,
+    text: msg.ok
+      ? `claimed gen ${msg.gen}`
+      : `rejected: ${msg.reason}${msg.currentGen != null ? ` (live gen ${msg.currentGen})` : ''}`,
+  });
+  if (state.pickupLog.length > 6) state.pickupLog.pop();
+  renderLab();
+}
+
+function noteLabResult(msg) {
+  state.labNote = msg.ok
+    ? `${msg.op}: ok${msg.released ? ` — released ${msg.released} held frame(s)` : ''}${msg.held ? ` — ${msg.held} still held` : ''}`
+    : `${msg.op}: no matching cached frame`;
+  renderLab();
+}
+
+function saveRepro() {
+  const id = state.labTarget.trim();
+  const repro = id ? scene.buildRepro(id) : scene.minimalRepro;
+  if (!repro || !repro.frames || !repro.frames.length) {
+    state.labNote = `no repro available for ${id || 'the first misbind'} yet`;
+    renderLab();
+    return;
+  }
+  const blob = new Blob([JSON.stringify(repro, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `repro-${repro.id}-gen${repro.gen}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  state.labNote = `saved ${repro.frames.length}-frame repro for ${repro.id} (gen ${repro.gen})`;
+  renderLab();
+}
+
+function renderLab() {
+  if (!state.me) return;
+  if (!state.labTarget && scene.firstMisbind) setLabTarget(scene.firstMisbind.id);
+  const id = state.labTarget.trim();
+
+  const lab = state.me.lab || {};
+  $('labstatus').textContent = [
+    lab.holdingCreates ? 'holding creates' : null,
+    lab.holdingDestroys ? 'holding destroys' : null,
+    lab.held ? `${lab.held} frame(s) held` : null,
+    lab.replays ? `${lab.replays} replay(s)` : null,
+    state.labNote,
+  ].filter(Boolean).join(' · ') || 'lab idle — no delays armed, nothing held';
+
+  const mb = scene.firstMisbind;
+  const banner = $('misbindbanner');
+  if (mb) {
+    banner.classList.remove('hidden');
+    banner.textContent =
+      `first misbound message @tick ${mb.tick}: ${mb.op} ${mb.id} gen ${mb.msgGen} ` +
+      `arrived for live gen ${mb.currentGen} — dropped, instance kept`;
+  } else {
+    banner.classList.add('hidden');
+  }
+
+  const serverEl = $('traceserver');
+  const clientEl = $('traceclient');
+  if (!id) {
+    serverEl.innerHTML = '<div class="empty">pick a target id</div>';
+    clientEl.innerHTML = '<div class="empty">pick a target id</div>';
+    $('traceservergen').textContent = '';
+    $('traceclientgen').textContent = '';
+  } else {
+    const serverLog = (state.me.instanceLog || []).filter((e) => e.id === id);
+    const clientLog = scene.log.filter((e) => e.id === id);
+    let serverGen = '—';
+    for (let i = serverLog.length - 1; i >= 0; i--) {
+      const op = serverLog[i].op;
+      if (op === 'destroy') { serverGen = `gen ${serverLog[i].gen} · destroyed`; break; }
+      if (op.startsWith('create') || op === 'recreate') { serverGen = `gen ${serverLog[i].gen}`; break; }
+    }
+    $('traceservergen').textContent = serverGen;
+    const ce = scene.entities.get(id);
+    $('traceclientgen').textContent = ce
+      ? `gen ${ce.gen}${ce.state?.claimed ? ' · claimed' : ''}`
+      : scene.staged.has(id) ? 'staged' : '—';
+    serverEl.innerHTML = serverLog.slice(-12).map((e) =>
+      `<div class="tr ${e.op}"><span class="t">${e.tick}</span><span class="op">${escapeHtml(e.op)}</span><span class="g">#${e.gen ?? '—'}</span><span class="nt">${escapeHtml(e.note || '')}</span></div>`,
+    ).join('') || '<div class="empty">no server events for this id</div>';
+    clientEl.innerHTML = clientLog.slice(-12).map((e) =>
+      `<div class="tr ${e.type}"><span class="t">${e.tick}</span><span class="op">${escapeHtml(e.type)}</span><span class="g">#${e.gen ?? '—'}</span><span class="nt">${e.currentGen != null ? `live #${e.currentGen}` : ''}</span></div>`,
+    ).join('') || '<div class="empty">no client events for this id</div>';
+  }
+
+  $('pickuplog').innerHTML = state.pickupLog.map((p) =>
+    `<div class="pk ${p.ok ? 'ok' : 'bad'}"><span class="t">${p.at}</span> ${escapeHtml(p.id)} · ${escapeHtml(p.text)}</div>`,
+  ).join('');
+}
+
 // ---- world drawing --------------------------------------------------------
 
 let dpr = 1;
@@ -563,6 +713,7 @@ const KIND_COLOR = {
   pipe: '#7f93a8',
   door: '#c0a06a',
   beacon: '#f472b6',
+  cache: '#e3b341',
 };
 
 function draw() {
@@ -655,6 +806,7 @@ function draw() {
     // legible without overloading the reason colour.
     const reasonColor = why ? REASON_INFO[why].color : '#7f93a8';
     const kindColor = KIND_COLOR[e.kind] || '#7f93a8';
+    const claimed = e.kind === 'cache' && e.state?.claimed;
     const s = e.kind === 'npc' ? 5 : e.kind === 'beacon' ? 4.5 : 4;
     ctx.fillStyle = reasonColor;
     ctx.beginPath();
@@ -664,6 +816,22 @@ function draw() {
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.lineWidth = 1;
+    if (claimed) {
+      ctx.strokeStyle = '#e3b341';
+      ctx.beginPath();
+      ctx.moveTo(p.x - 3.4, p.y + 0.2);
+      ctx.lineTo(p.x - 0.9, p.y + 2.8);
+      ctx.lineTo(p.x + 3.6, p.y - 2.6);
+      ctx.stroke();
+    }
+    if (e.id === state.labTarget && state.labTarget) {
+      ctx.strokeStyle = '#ffffff';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, s + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     if (why === 'interest-grace') ctx.globalAlpha = 0.55;
     if (e.id === state.hoverId) {
       ctx.strokeStyle = '#ffffffaa';

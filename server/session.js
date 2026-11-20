@@ -107,11 +107,17 @@ export class ObserverSession {
     this.holds = new Map();       // id -> tick the hold ends
     this.graceUntil = new Map();  // id -> tick the grace ends
 
-    this.created = new Map();       // id -> {versionSent, xSent, ySent, stateSent, regionSent}
-    this.pendingCreate = new Map(); // id -> {baselineId, sentTick, version, retries, ...}
+    this.created = new Map();       // id -> {versionSent, xSent, ySent, stateSent, regionSent, gen}
+    this.pendingCreate = new Map(); // id -> {baselineId, sentTick, version, retries, gen, ...}
     this.awaitingBaselines = new Map(); // baselineId -> Set<id>
     this.evicting = new Map();      // id -> tick at which the destroy is due
     this.archived = new Set();      // ids this observer has seen destroyed
+
+    // Instance generations: how many times this observer has been sent a
+    // create for an id. Every create/destroy/update carries the generation so
+    // a stale message can never bind to a newer instance of the same id.
+    this.instanceGen = new Map();   // id -> latest generation emitted
+    this.instanceLog = [];          // recent per-instance events for tracing
 
     this.desired = new Map();
     this.desiredSince = new Map(); // id -> tick it first entered interest
@@ -171,6 +177,32 @@ export class ObserverSession {
     return { ok: true, holdTicks: INTERACT_HOLD_TICKS };
   }
 
+  // A pickup names the instance generation the client is looking at. A stale
+  // generation means the client is acting on a replica the server has already
+  // torn down, so it must never touch the live item.
+  pickup(id, gen) {
+    const e = this.world.getEntity(id);
+    if (!e || !e._pickable) return { ok: false, reason: 'not-pickable' };
+    const rec = this.created.get(id) || this.pendingCreate.get(id);
+    if (!rec) return { ok: false, reason: 'not-replicated' };
+    if (gen != null && rec.gen !== gen) {
+      this._logInstance('pickup-stale', id, gen, `current gen ${rec.gen}`);
+      return { ok: false, reason: 'stale-generation', currentGen: rec.gen };
+    }
+    if (!this.world.claim(id, this.id)) {
+      this._logInstance('pickup-denied', id, rec.gen, 'already-claimed');
+      return { ok: false, reason: 'already-claimed', gen: rec.gen };
+    }
+    this.holds.set(id, this.world.tick + INTERACT_HOLD_TICKS);
+    this._logInstance('pickup', id, rec.gen, 'claimed');
+    return { ok: true, gen: rec.gen };
+  }
+
+  _logInstance(op, id, gen, note) {
+    this.instanceLog.push({ tick: this.world.tick, op, id, gen, ...(note ? { note } : {}) });
+    if (this.instanceLog.length > 120) this.instanceLog.shift();
+  }
+
   ack(baselineId) {
     const ids = this.awaitingBaselines.get(baselineId);
     if (!ids) return false;
@@ -184,6 +216,7 @@ export class ObserverSession {
         ySent: waiting.y,
         stateSent: waiting.stateJSON,
         regionSent: waiting.region,
+        gen: waiting.gen,
       });
     }
     this.awaitingBaselines.delete(baselineId);
@@ -341,6 +374,8 @@ export class ObserverSession {
     // when an observer loses interest; server entities are untouched.
     // Children are released before parents (reverse of creation order) so a
     // client never has to stage a child whose parent is in the same frame.
+    // Each destroy names the generation of the instance it retires, so a
+    // delayed or replayed destroy cannot bind to a newer incarnation.
     const destroys = [];
     const evictOrder = [...this.evicting.keys()].sort((a, b) => {
       const ea = world.getEntity(a);
@@ -348,9 +383,11 @@ export class ObserverSession {
       return this.chainDepth(eb) - this.chainDepth(ea);
     });
     for (const id of evictOrder) {
-      if (ops >= opBudget || est + 10 > byteBudget) break;
-      destroys.push(id);
-      est += 10;
+      if (ops >= opBudget || est + 18 > byteBudget) break;
+      const rec = this.created.get(id) || this.pendingCreate.get(id);
+      const gen = rec ? rec.gen : (this.instanceGen.get(id) || 1);
+      destroys.push({ i: id, g: gen });
+      est += 18;
       ops++;
     }
 
@@ -383,6 +420,9 @@ export class ObserverSession {
         continue; // parent filtered by budget: hold the child explicitly
       }
       const payload = world.snapshotEntity(e);
+      // Tentative generation, committed only if this create survives trimming
+      // and is registered below. A trimmed create leaves no generation gap.
+      payload.g = (this.instanceGen.get(cand.id) || 0) + 1;
       const size = JSON.stringify(payload).length + 1;
       if (est + size > byteBudget) continue;
       creates.push(payload);
@@ -415,7 +455,7 @@ export class ObserverSession {
     );
     for (const cand of updCandidates) {
       if (ops >= opBudget) break;
-      const u = { i: cand.e.id, v: cand.e.version, x: cand.e.x, y: cand.e.y };
+      const u = { i: cand.e.id, v: cand.e.version, x: cand.e.x, y: cand.e.y, n: cand.rec.gen };
       if (cand.dirtyState) u.s = cand.e.state;
       if (cand.dirtyRegion) u.g = cand.e.region;
       const size = JSON.stringify(u).length + 1;
@@ -480,11 +520,15 @@ export class ObserverSession {
       const ids = new Set();
       for (const payloadEntity of frame.c) {
         const e = world.getEntity(payloadEntity.id);
-        if (this.archived.delete(payloadEntity.id)) this.metrics.recreatedSent++;
+        const recreated = this.archived.delete(payloadEntity.id);
+        if (recreated) this.metrics.recreatedSent++;
+        this.instanceGen.set(payloadEntity.id, payloadEntity.g);
+        this._logInstance(recreated ? 'recreate' : 'create', payloadEntity.id, payloadEntity.g);
         this.pendingCreate.set(payloadEntity.id, {
           baselineId,
           sentTick: tick,
           retries: 0,
+          gen: payloadEntity.g,
           version: e.version,
           stateJSON: e.state ? JSON.stringify(e.state) : null,
           region: e.region,
@@ -498,7 +542,8 @@ export class ObserverSession {
       this.metrics.createsSent += frame.c.length;
     }
 
-    for (const id of destroys) {
+    for (const ref of destroys) {
+      const id = ref.i;
       this.created.delete(id);
       this.pendingCreate.delete(id);
       this.evicting.delete(id);
@@ -506,15 +551,17 @@ export class ObserverSession {
       this.archived.add(id);
       this.destroyedAt.set(id, tick);
       this.metrics.destroysSent++;
+      this._logInstance('destroy', id, ref.g);
     }
     if (this.destroyedAt.size > 400) {
       for (const id of [...this.destroyedAt.keys()].slice(0, 200)) this.destroyedAt.delete(id);
     }
     // Drop ack bookkeeping for ids that were destroyed before acking.
     if (destroys.length) {
-      for (const [bid, ids] of this.awaitingBaselines) {
-        for (const id of destroys) ids.delete(id);
-        if (!ids.size) this.awaitingBaselines.delete(bid);
+      const ids = destroys.map((ref) => ref.i);
+      for (const [bid, idSet] of this.awaitingBaselines) {
+        for (const id of ids) idSet.delete(id);
+        if (!idSet.size) this.awaitingBaselines.delete(bid);
       }
     }
 
@@ -575,6 +622,7 @@ export class ObserverSession {
       }
       const baselineId = `b${this.id}-${++this.baselineCounter}`;
       const payloadEntity = this.world.snapshotEntity(e);
+      payloadEntity.g = pending.gen;
       pending.baselineId = baselineId;
       pending.sentTick = tick;
       pending.retries++;
@@ -584,6 +632,7 @@ export class ObserverSession {
       pending.stateJSON = e.state ? JSON.stringify(e.state) : null;
       pending.region = e.region;
       this.awaitingBaselines.set(baselineId, new Set([id]));
+      this._logInstance('create-retry', id, pending.gen);
       const retryFrame = {
         t: 'f', k: tick, b: baselineId, c: [payloadEntity],
         r: 1, p: { x: round1(this.pose.x), y: round1(this.pose.y), f: round2(this.pose.facing) },
@@ -641,6 +690,7 @@ export class ObserverSession {
       replicated: this.created.size,
       inFlight: this.pendingCreate.size,
       pinned: [...this.pins],
+      instanceLog: this.instanceLog.slice(-40),
       metrics: {
         ...this.metrics,
         bytesPerTickAvg: avg(this.bytesPerTick),

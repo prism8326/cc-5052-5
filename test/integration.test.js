@@ -67,7 +67,7 @@ test('http endpoints serve the dashboard and telemetry', async () => {
   assert.ok(health.tick >= 0);
 
   const state = await (await fetch(`${baseUrl}/api/state`)).json();
-  assert.equal(state.world.entities, 72);
+  assert.equal(state.world.entities, 84);
   assert.equal(state.world.regions.length, 12);
   assert.equal(state.observers.filter((o) => o.mode === 'virtual').length, 3);
 });
@@ -177,4 +177,83 @@ test('a declared team link survives being far outside the view cone', async () =
   const mine = state.observers.find((o) => o.id === d.welcome.observerId);
   assert.ok(mine.counts['team-link'] >= 1);
   d.close();
+});
+
+test('lab reorder over a real socket: stale destroy is scoped, pickup validates generations', async () => {
+  // A pickable cache with an interactive neighbour that acts as the control.
+  const caches = [...app.world.entities.values()].filter((e) => e._pickable);
+  let target = null;
+  for (const cache of caches) {
+    const ctrl = [...app.world.entities.values()].find((e) =>
+      e._interactive && Math.hypot(e.x - cache.x, e.y - cache.y) < 70);
+    if (ctrl) { target = { cache, ctrl }; break; }
+  }
+  assert.ok(target, 'found a cache with an interactive control nearby');
+  const { cache, ctrl } = target;
+
+  const c = await connectClient();
+  const pickupResults = [];
+  c.ws.on('message', (raw) => {
+    const msg = JSON.parse(raw.toString());
+    if (msg.t === 'pickup-result') pickupResults.push(msg);
+  });
+  const farX = cache.x + 400 > WORLD.width - 10 ? cache.x - 400 : cache.x + 400;
+  c.view(cache.x, cache.y, 0, { radius: 110, halfAngle: Math.PI, nearRadius: 30 }, { bytes: 5000, ops: 60 });
+  await sleep(600);
+  assert.ok(c.scene.entities.has(cache.id), 'cache subscribed');
+  assert.equal(c.scene.entities.get(cache.id).gen, 1);
+  const controlRef = c.scene.entities.get(ctrl.id);
+  assert.ok(controlRef, 'control subscribed');
+
+  // Ongoing interaction on the control: its hold must survive the lab.
+  c.ws.send(JSON.stringify({ t: 'interact', id: ctrl.id }));
+  await sleep(120);
+
+  // Hold destroys, leave past the grace window, come straight back.
+  c.ws.send(JSON.stringify({ t: 'lab', op: 'delay-destroys', ticks: 200 }));
+  await sleep(80);
+  c.view(farX, cache.y, 0);
+  await sleep(600); // grace (12 ticks at 25ms) expires; the destroy is held
+  c.view(cache.x, cache.y, 0);
+  await sleep(500); // the re-create (gen 2) is not held and applies
+  assert.equal(c.scene.entities.get(cache.id)?.gen, 2, 'returning created generation 2');
+
+  // Releasing the lab delivers the old destroy after the new create.
+  c.ws.send(JSON.stringify({ t: 'lab', op: 'clear' }));
+  await sleep(250);
+
+  const item = c.scene.entities.get(cache.id);
+  assert.ok(item, 'new instance survives the late destroy');
+  assert.equal(item.gen, 2);
+  assert.ok(c.scene.misbinds.some((m) => m.id === cache.id && m.op === 'destroy' && m.msgGen === 1 && m.currentGen === 2),
+    'tracer recorded the misbound destroy');
+  assert.ok(c.scene.minimalRepro, 'a minimal packet sequence was saved');
+  assert.equal(c.scene.entities.get(ctrl.id), controlRef, 'control object identity untouched');
+
+  // Actual pickup results: the original instance is gone for good, the new
+  // one claims normally, and no instance can be claimed twice.
+  const pickup = (id, gen) => {
+    c.ws.send(JSON.stringify({ t: 'pickup', id, gen }));
+    return sleep(120);
+  };
+  await pickup(cache.id, 1);
+  await pickup(cache.id, 2);
+  await pickup(cache.id, 2);
+  assert.equal(pickupResults.length, 3);
+  assert.deepEqual(
+    pickupResults.map((r) => ({ ok: r.ok, reason: r.reason || null })),
+    [
+      { ok: false, reason: 'stale-generation' },
+      { ok: true, reason: null },
+      { ok: false, reason: 'already-claimed' },
+    ],
+  );
+
+  // Telemetry exposes the server side of the per-instance trace.
+  const state = await (await fetch(`${baseUrl}/api/state`)).json();
+  const mine = state.observers.find((o) => o.id === c.welcome.observerId);
+  const ops = mine.instanceLog.filter((e) => e.id === cache.id).map((e) => `${e.op}#${e.gen}`);
+  assert.ok(ops.includes('destroy#1') && ops.includes('recreate#2'), `server trace has the churn: ${ops}`);
+  assert.ok(mine.instanceLog.some((e) => e.op === 'pickup' && e.id === cache.id), 'pickup traced server-side');
+  c.close();
 });

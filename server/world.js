@@ -61,6 +61,7 @@ export class World {
       _radius: extra.radius ?? 0,
       _speed: extra.speed ?? 0,
       _interactive: !!extra.interactive,
+      _pickable: !!extra.pickable,
     };
     this.entities.set(id, entity);
     return entity;
@@ -112,6 +113,15 @@ export class World {
             state: { hp: 60 + Math.floor(this.rand() * 40) },
           });
         }
+
+        // One claimable cache per region. Pickup is validated against the
+        // observer's instance generation, so a stale replica of the same id
+        // can never claim the item twice.
+        this._add('cache', x0 + 30 + this.rand() * (WORLD.cellW - 60), y0 + 30 + this.rand() * (WORLD.cellH - 60), {
+          name: `cache @ ${label}`,
+          pickable: true,
+          state: { claimed: false },
+        });
       }
     }
 
@@ -145,6 +155,15 @@ export class World {
     if (!e || !e._interactive) return false;
     e.version++;
     e.state = { ...(e.state || {}), lastBy: observerId, lastTick: this.tick };
+    return true;
+  }
+
+  claim(entityId, observerId) {
+    const e = this.entities.get(entityId);
+    if (!e || !e._pickable) return false;
+    if (e.state && e.state.claimed) return false;
+    e.version++;
+    e.state = { ...(e.state || {}), claimed: true, claimedBy: observerId, claimedTick: this.tick };
     return true;
   }
 
